@@ -136,13 +136,15 @@ private:
     } else {
       info["deaths"] = info["deaths"].as_int64() + 1;
     }
-    Log("Deaths: {}", info["deaths"].as_int64());
 
     if (!info.contains("days") || !info["days"].is_number()) {
       info["days"] = days;
     } else {
       info["days"] = info["days"].as_double() + days;
     }
+
+    Log(" ");
+    Log("Deaths: {}", info["deaths"].as_int64());
     Log("Days: {}", info["days"].as_double());
 
     // Create json file backup.
