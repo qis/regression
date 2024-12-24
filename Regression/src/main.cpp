@@ -81,7 +81,7 @@ protected:
         s.count());
 
       UpdateDeaths(backup, filename, skyrim / "regression.json");
-      UpdateSpells(backup, filename, skyrim / "regression.txt");
+      UpdateSpells(backup, filename, skyrim / "spells.txt");
       UpdateSkills(backup, filename, plugins / "SkyrimUncapper.ini");
       RE::DebugMessageBox("Regression!");
     }
