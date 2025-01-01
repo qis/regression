@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
-project(regression DESCRIPTION "Regression" VERSION 0.1.0 LANGUAGES CXX)
+project(regression DESCRIPTION "Regression" VERSION 0.2.0 LANGUAGES CXX)
 
 configure_file(res/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/src/version.h LF)
 
