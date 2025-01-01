@@ -10,6 +10,19 @@ private:
   Regression& operator=(const Regression& other) = delete;
 
 public:
+  static void Log(const std::string& msg)
+  {
+    if (const auto log = RE::ConsoleLog::GetSingleton()) {
+      log->Print("%s", msg.data());
+    }
+  }
+
+  template <class Arg, class... Args>
+  static void Log(std::format_string<Arg, Args...> fmt, Arg&& arg, Args&&... args)
+  {
+    Log(std::vformat(fmt.get(), std::make_format_args(arg, args...)));
+  }
+
   static void Listener(SKSE::MessagingInterface::Message* message) noexcept
   {
     switch (message->type) {
@@ -48,9 +61,9 @@ protected:
       return RE::BSEventNotifyControl::kContinue;
     }
     try {
+      // Create backup directory.
       const auto skyrim = GetSkyrimPath();
       const auto backup = skyrim / "Backup";
-      const auto plugins = skyrim / "Data" / "SKSE" / "Plugins";
 
       if (!std::filesystem::exists(backup)) {
         if (!std::filesystem::create_directory(backup)) {
@@ -61,6 +74,10 @@ protected:
         throw std::runtime_error("Not a directory: " + backup.string());
       }
 
+      // Construct json file path.
+      const auto src = skyrim / "regression.json";
+
+      // Construct backup file path.
       const auto ctz = std::chrono::current_zone();
       const auto now = ctz->to_local(std::chrono::system_clock::now());
       const auto day = std::chrono::time_point_cast<std::chrono::days>(now);
@@ -71,18 +88,57 @@ protected:
       const auto m = std::chrono::duration_cast<std::chrono::minutes>(tod) - h;
       const auto s = std::chrono::duration_cast<std::chrono::seconds>(tod) - h - m;
 
-      const auto filename = std::format(
-        "regression-{:04}{:02}{:02}-{:02}{:02}{:02}",
-        static_cast<int>(ymd.year()),
-        static_cast<unsigned>(ymd.month()),
-        static_cast<unsigned>(ymd.day()),
-        h.count(),
-        m.count(),
-        s.count());
+      // clang-format off
+      const auto dst = backup / std::format(
+          "regression-{:04}{:02}{:02}-{:02}{:02}{:02}.json",
+          static_cast<int>(ymd.year()),
+          static_cast<unsigned>(ymd.month()),
+          static_cast<unsigned>(ymd.day()),
+          h.count(), m.count(), s.count());
+      // clang-format on
 
-      UpdateDeaths(backup, filename, skyrim / "regression.json");
-      UpdateSpells(backup, filename, skyrim / "spells.txt");
-      UpdateSkills(backup, filename, plugins / "SkyrimUncapper.ini");
+      // Read json data.
+      boost::json::object info;
+      if (std::fstream file{ src, std::ios::in | std::ios::binary }) {
+        if (const auto value = boost::json::parse(file); value.is_object()) {
+          info = value.as_object();
+        }
+      }
+
+      // Update json data.
+      UpdateSpells(info);
+      UpdateSkills(info);
+      UpdateDeaths(info);
+
+      // Create json backup.
+      if (std::filesystem::exists(src)) {
+        if (!std::filesystem::is_regular_file(src)) {
+          throw std::runtime_error("Not a regular file: " + src.string());
+        }
+        if (std::filesystem::exists(dst)) {
+          throw std::runtime_error("File already exists: " + dst.string());
+        }
+        std::error_code ec;
+        if (!std::filesystem::copy_file(src, dst, ec) || ec) {
+          throw std::runtime_error("Could not create file: " + dst.string());
+        }
+      }
+
+      // Write json contents.
+      std::fstream file{ src, std::ios::out | std::ios::trunc | std::ios::binary };
+      if (!file) {
+        throw std::runtime_error("Could not open file: " + src.string());
+      }
+      Write(file, info);
+      file.close();
+      if (!file) {
+        std::error_code ec;
+        std::filesystem::copy_file(dst, src, ec);
+        throw std::runtime_error("Could not write file: " + src.string());
+      }
+
+      Log(" ");
+      Log("Updated: {}", src.string());
       RE::DebugMessageBox("Regression!");
     }
     catch (const std::exception& e) {
@@ -98,8 +154,6 @@ protected:
 
 private:
   using Skills = std::unordered_map<RE::ActorValue, std::string>;
-  using Values = std::unordered_map<RE::ActorValue, unsigned>;
-  using Spells = std::map<RE::ActorValue, std::map<RE::FormID, std::string>>;
 
   static std::filesystem::path GetSkyrimPath()
   {
@@ -113,76 +167,7 @@ private:
     return std::filesystem::canonical(str).parent_path();
   }
 
-  static void UpdateDeaths(
-    const std::filesystem::path& backup,
-    const std::string& filename,
-    const std::filesystem::path& src)
-  {
-    const auto calendar = RE::Calendar::GetSingleton();
-    if (!calendar) {
-      throw std::runtime_error("Could not get calendar.");
-    }
-    const auto days = calendar->GetDaysPassed();
-
-    boost::json::object info;
-    if (std::fstream file{ src, std::ios::in | std::ios::binary }) {
-      if (const auto value = boost::json::parse(file); value.is_object()) {
-        info = value.as_object();
-      }
-    }
-
-    if (!info.contains("deaths") || !info["deaths"].is_number()) {
-      info["deaths"] = 1;
-    } else {
-      info["deaths"] = info["deaths"].as_int64() + 1;
-    }
-
-    if (!info.contains("days") || !info["days"].is_number()) {
-      info["days"] = days;
-    } else {
-      info["days"] = info["days"].as_double() + days;
-    }
-
-    Log(" ");
-    Log("Deaths: {}", info["deaths"].as_int64());
-    Log("Days: {}", info["days"].as_double());
-
-    // Create json file backup.
-    if (std::filesystem::exists(src)) {
-      if (!std::filesystem::is_regular_file(src)) {
-        throw std::runtime_error("Not a regular file: " + src.string());
-      }
-      const auto dst = backup / (filename + ".json");
-      if (std::filesystem::exists(dst)) {
-        throw std::runtime_error("File already exists: " + dst.string());
-      }
-      std::error_code ec;
-      if (!std::filesystem::copy_file(src, dst, ec) || ec) {
-        throw std::runtime_error("Could not create file: " + dst.string());
-      }
-    }
-
-    // Write json file contents.
-    std::fstream file{ src, std::ios::out | std::ios::trunc | std::ios::binary };
-    if (!file) {
-      throw std::runtime_error("Could not open file: " + src.string());
-    }
-
-    file << boost::json::serialize(info);
-
-    file.close();
-    if (!file) {
-      throw std::runtime_error("Could not write file: " + src.string());
-    }
-
-    Log(" ");
-    Log("Updated: {}", src.string());
-  }
-
-  static void UpdateSpells(
-    const std::filesystem::path& backup,
-    const std::string& filename,
-    const std::filesystem::path& src)
+  static void UpdateSpells(boost::json::object& info)
   {
     // Get player spells.
     const auto actor = RE::PlayerCharacter::GetSingleton();
@@ -197,9 +182,9 @@ private:
 
     class SpellsVisitor : public RE::Actor::ForEachSpellVisitor {
     public:
-      Spells& spells;
+      boost::json::array& spells;
 
-      SpellsVisitor(Spells& spells) :
+      SpellsVisitor(boost::json::array& spells) :
         spells(spells)
       {}
 
@@ -218,68 +203,21 @@ private:
         case RE::ActorValue::kDestruction:
         case RE::ActorValue::kIllusion:
         case RE::ActorValue::kRestoration:
-          spells[skill].emplace(spell->GetFormID(), name);
+          Regression::Log("SPELL {:08X} {}", spell->GetFormID(), name);
+          spells.push_back(boost::json::string{ std::format("{:08X}", spell->GetFormID()) });
           break;
         }
         return RE::BSContainer::ForEachResult::kContinue;
       }
     };
 
-    Spells spells;
+    boost::json::array spells;
     SpellsVisitor visitor{ spells };
     actor->VisitSpells(visitor);
-
-    // Create txt file backup.
-    if (std::filesystem::exists(src)) {
-      if (!std::filesystem::is_regular_file(src)) {
-        throw std::runtime_error("Not a regular file: " + src.string());
-      }
-      const auto dst = backup / (filename + ".txt");
-      if (std::filesystem::exists(dst)) {
-        throw std::runtime_error("File already exists: " + dst.string());
-      }
-      std::error_code ec;
-      if (!std::filesystem::copy_file(src, dst, ec) || ec) {
-        throw std::runtime_error("Could not create file: " + dst.string());
-      }
-    }
-
-    // Write txt file contents.
-    std::fstream file{ src, std::ios::out | std::ios::trunc | std::ios::binary };
-    if (!file) {
-      throw std::runtime_error("Could not open file: " + src.string());
-    }
-    auto os = std::ostream_iterator<char>(file);
-
-    auto first = true;
-    for (const auto& [skill, list] : spells) {
-      Log(" ");
-      if (first) {
-        first = false;
-      } else {
-        file.put('\n');
-      }
-      Log(std::to_string(skill));
-      std::format_to(os, "; {}\n", std::to_string(skill));
-      for (const auto& [id, name] : list) {
-        Log("SPELL {:08X} {}", id, name);
-        std::format_to(os, "player.addspell {:08X}  ; {}\n", id, name);
-      }
-    }
-
-    file.close();
-    if (!file) {
-      throw std::runtime_error("Could not write file: " + src.string());
-    }
-
-    Log(" ");
-    Log("Updated: {}", src.string());
+    info["Spells"] = spells;
   }
 
-  static void UpdateSkills(
-    const std::filesystem::path& backup,
-    const std::string& filename,
-    const std::filesystem::path& src)
+  static void UpdateSkills(boost::json::object& info)
   {
     // Get player skill values.
     const auto actor = RE::PlayerCharacter::GetSingleton();
@@ -314,186 +252,116 @@ private:
     skills[RE::ActorValue::kAlchemy]     = "Alchemy";
     // clang-format on
 
-    Values values;
+    if (!info["Skills"].is_object()) {
+      info["Skills"] = boost::json::object{};
+    }
+    auto& values = info["Skills"].as_object();
 
+    Log(" ");
     for (const auto& [skill, name] : skills) {
-      const auto max = avo->GetPermanentActorValue(skill);
+      const auto old = values[name].is_double() ? static_cast<float>(values[name].as_double()) : 0.0f;
       const auto per = actor->GetActorValueModifier(RE::ACTOR_VALUE_MODIFIER::kPermanent, skill);
-      values[skill] = static_cast<unsigned>(std::round(std::max(0.0f, max - per)));
-    }
-
-    // Read ini file.
-    if (!std::filesystem::is_regular_file(src)) {
-      throw std::runtime_error("Not a regular file: " + src.string());
-    }
-
-    std::fstream file{ src, std::ios::in | std::ios::ate | std::ios::binary };
-    if (!file) {
-      throw std::runtime_error("Could not open file: " + src.string());
-    }
-    std::string data;
-    const auto size = static_cast<unsigned>(file.tellg());
-    file.seekg(std::ios::beg);
-    data.resize(size);
-    file.read(data.data(), size);
-    file.close();
-    if (!file) {
-      throw std::runtime_error("Could not read file: " + src.string());
-    }
-
-    // Parse ini file.
-    std::vector<std::string> lines;
-    boost::algorithm::split(lines, data, [](char c) { return c == '\n'; });
-    for (auto& line : lines) {
-      if (const auto pos = line.find_last_not_of('\r'); pos != std::string::npos) {
-        line.resize(pos + 1);
-      } else {
-        line.clear();
+      const auto cur = std::max(0.0f, avo->GetPermanentActorValue(skill) - per);
+      if (cur > old && cur - old > 0.1f) {
+        Log("SKILL {:5.1f} {}", cur, name);
       }
+      values[name] = static_cast<double>(std::max(old, cur));
     }
-    const auto eexp = std::string{ R"INI(\s*(\d+)\s*=\s*(\d+).*)INI" };
-    const auto ereg = boost::regex{
-      eexp, boost::regex_constants::ECMAScript | boost::regex_constants::icase | boost::regex_constants::optimize
-    };
-    for (const auto& [skill, name] : skills) {
-      // Find skill section.
-      auto found = false;
-      const auto current = values[skill];
-      const auto sexp = std::format(R"INI(\s*\[SkillExpGainMults\\BaseSkillLevel\\{}\])INI", name);
-      const auto sreg = boost::regex{ sexp, boost::regex_constants::ECMAScript | boost::regex_constants::icase };
-      for (std::size_t i = 0; i < lines.size(); i++) {
-        if (boost::regex_match(lines[i], sreg)) {
-          // Find skill section "level = value" entries.
-          const auto replace = i + 1;
-          std::map<unsigned, unsigned> entries;
-          for (boost::smatch match; boost::regex_match(lines[i + 1], match, ereg); i++) {
-            auto level = 0u;
-            const auto match1 = match[1].str();
-            if (std::from_chars(match1.data(), match1.data() + match1.size(), level).ec != std::errc{}) {
-              throw std::runtime_error("Could not parse " + name + " level: " + match1);
-            }
-            auto value = 0u;
-            const auto match2 = match[2].str();
-            if (std::from_chars(match2.data(), match2.data() + match2.size(), value).ec != std::errc{}) {
-              throw std::runtime_error("Could not parse " + name + " value: " + match2);
-            }
-            entries[level] = value;
-          }
+  }
 
-          // The list must not be empty.
-          if (entries.empty()) {
-            throw std::runtime_error("Missing entries in " + name + ".");
-          }
+  static void UpdateDeaths(boost::json::object& info)
+  {
+    const auto calendar = RE::Calendar::GetSingleton();
+    if (!calendar) {
+      throw std::runtime_error("Could not get calendar.");
+    }
+    const auto days = calendar->GetDaysPassed();
 
-          // The first entry must be for level 0.
-          if (entries.begin()->first != 0) {
-            throw std::runtime_error("Missing level 0 entry in " + name + ".");
-          }
-
-          // The last entry must have a factor of 1.
-          auto it = entries.rbegin();
-          const auto end = entries.rend();
-          if (it->second != 1u) {
-            throw std::runtime_error("The largest factor in " + name + " is not 1.");
-          }
-
-          // Lower levels must have higher factor.
-          for (auto c = it, n = std::next(it); n != end; ++c, ++n) {
-            if (n->second <= c->second) {
-              throw std::runtime_error("Invalid factor order in " + name + ".");
-            }
-          }
-
-          // Skip all entries with a higher level.
-          auto factor = 0u;
-          for (; it != end && it->first > current; ++it) {
-            factor = it->second;
-          }
-
-          // Sanity check - should always be false.
-          if (it == end) {
-            throw std::runtime_error(std::format("All levels in {} are higher, than {}.", name, current));
-          }
-
-          // Create a new entry if the level is missing.
-          std::optional<unsigned> create;
-          if (it->first != current) {
-            create = factor + 1;
-            it->second += 1;
-          }
-
-          // Increase factors of all entries with a lower level by 1.
-          for (++it; it != end; ++it) {
-            it->second += 1;
-          }
-
-          // Create a new entry if necessary.
-          if (create) {
-            entries[current] = create.value();
-          }
-
-          // Replace entries.
-          auto insert = lines.erase(lines.begin() + replace, lines.begin() + i + 1);
-          for (const auto [level, value] : entries) {
-            insert = std::next(lines.insert(insert, std::format("{} = {}.0", level, value)));
-          }
-
-          Log(" ");
-          for (auto line = std::prev(lines.begin() + replace); line != insert; ++line) {
-            Log(*line);
-          }
-
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        throw std::runtime_error("Could not find " + name + " in " + src.string());
-      }
+    if (info["Days"].is_double()) {
+      info["Days"] = std::max(info["Days"].as_double(), static_cast<double>(days));
+    } else {
+      info["Days"] = days;
     }
 
-    // Create ini file backup.
-    const auto dst = backup / (filename + ".ini");
-    if (std::filesystem::exists(dst)) {
-      throw std::runtime_error("File already exists: " + dst.string());
-    }
-
-    std::error_code ec;
-    if (!std::filesystem::copy_file(src, dst, ec) || ec) {
-      throw std::runtime_error("Could not create file: " + dst.string());
-    }
-
-    // Write ini file contents.
-    file.open(src, std::ios::out | std::ios::trunc | std::ios::binary);
-    if (!file) {
-      throw std::runtime_error("Could not reopen file: " + src.string());
-    }
-
-    for (const auto& line : lines) {
-      file.write(line.data(), static_cast<std::streamsize>(line.size()));
-      file.write("\r\n", 2);
-    }
-    file.close();
-
-    if (!file) {
-      throw std::runtime_error("Could not write file: " + src.string());
+    if (info["Deaths"].is_int64()) {
+      info["Deaths"] = info["Deaths"].as_int64() + 1;
+    } else {
+      info["Deaths"] = 1;
     }
 
     Log(" ");
-    Log("Updated: {}", src.string());
+    Log("Deaths: {}", info["Deaths"].as_int64());
+    Log("Days: {}", info["Days"].as_double());
   }
 
-  static void Log(const std::string& msg)
+  static void Write(std::ostream& os, const boost::json::value& value, std::string* indent = nullptr)
   {
-    if (const auto log = RE::ConsoleLog::GetSingleton()) {
-      log->Print("%s", msg.data());
+    std::unique_ptr<std::string> indent_storage;
+    if (!indent) {
+      indent_storage = std::make_unique<std::string>();
+      indent = indent_storage.get();
     }
-  }
-
-  template <class Arg, class... Args>
-  static void Log(std::format_string<Arg, Args...> fmt, Arg&& arg, Args&&... args)
-  {
-    Log(std::vformat(fmt.get(), std::make_format_args(arg, args...)));
+    switch (value.kind()) {
+    case boost::json::kind::object:
+      if (const auto& obj = value.get_object(); !obj.empty()) {
+        std::map<std::string, boost::json::value> entries;
+        for (const auto& e : obj) {
+          entries[e.key()] = e.value();
+        }
+        os << "{\n";
+        indent->append(2, ' ');
+        for (auto it = entries.cbegin(); true;) {
+          os << *indent << boost::json::serialize(it->first) << ": ";
+          Write(os, it->second, indent);
+          if (++it == entries.cend()) {
+            break;
+          }
+          os << ",\n";
+        }
+        indent->resize(indent->size() - 2);
+        os << '\n' << *indent << '}';
+      } else {
+        os << "{}";
+      }
+      break;
+    case boost::json::kind::array:
+      if (const auto& arr = value.get_array(); !arr.empty()) {
+        os << "[\n";
+        indent->append(2, ' ');
+        for (auto it = arr.begin(); true;) {
+          os << *indent;
+          Write(os, *it, indent);
+          if (++it == arr.end()) {
+            break;
+          }
+          os << ",\n";
+        }
+        indent->resize(indent->size() - 2);
+        os << '\n' << *indent << ']';
+      } else {
+        os << "[]";
+      }
+      break;
+    case boost::json::kind::string:
+      os << boost::json::serialize(value.get_string());
+      break;
+    case boost::json::kind::uint64:
+    case boost::json::kind::int64:
+      os << value;
+      break;
+    case boost::json::kind::double_:
+      std::format_to(std::ostream_iterator<char>(os), "{:.1f}", value.get_double());
+      break;
+    case boost::json::kind::bool_:
+      os << value.get_bool() ? "true" : "false";
+      break;
+    case boost::json::kind::null:
+      os << "null";
+      break;
+    }
+    if (indent->empty()) {
+      os << '\n';
+    }
   }
 };
 
