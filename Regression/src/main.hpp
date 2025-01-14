@@ -8,6 +8,10 @@
 #include <boost/json/serialize.hpp>
 #include <boost/json/value.hpp>
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+
 #include <chrono>
 #include <filesystem>
 #include <format>
